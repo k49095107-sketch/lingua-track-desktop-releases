@@ -1,6 +1,10 @@
 name: PHASE 11E.3 Public Release Drift Monitor
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/phase11e3-public-release-drift-monitor.yml'
   workflow_dispatch:
   schedule:
     - cron: '17 6 * * *'
