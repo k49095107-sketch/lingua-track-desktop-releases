@@ -1,0 +1,113 @@
+name: PHASE 11E.3 Public Release Drift Monitor
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase11e3-public-release-drift-monitor
+  cancel-in-progress: false
+
+jobs:
+  verify-pinned-public-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify PHASE 11E.2 pinned baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: k49095107-sketch/lingua-track-desktop-releases
+          EXPECTED_VISIBILITY: public
+          EXPECTED_RELEASE_ID: "396023249"
+          EXPECTED_TAG: v1.0.0-desktop.1
+          EXPECTED_TAG_COMMIT: b0e98ef8d15b97bd1aed50bc3b4f6b508bebf261
+          EXPECTED_TAG_TREE: b97b1d6f571a9bd8728fe4a65a7829565eed771a
+          EXPECTED_ASSETS_JSON: >-
+            {"LINGUA_TRACK_VERIFY_SIGSTORE.txt":"sha256:75adff8afd5be0441d9e84ebff4eaa3e1a61fa965d59da193c47c101a4cab21d","PHASE11C7_SIGNED_RC_SHA256.txt":"sha256:1a485252a50561002253d779ef651eef202b7af5e010989dc5260cb5c3760114","lingua-track_1.0.0.desktop.1+phase11c3_amd64.deb":"sha256:aacaa10b4c877a08c480fb48b7790ed2f824b4a483050b130c87789c0839a64f","lingua-track_1.0.0.desktop.1+phase11c3_amd64.deb.sigstore.json":"sha256:55a79973c9d5e53028a1569efa05f4b2fc40ec2b1f6c21108c119f381ec9e849"}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, urllib.request
+
+          token = os.environ["GH_TOKEN"]
+          repo = os.environ["REPO"]
+          api = "https://api.github.com"
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "User-Agent": "phase11e3-drift-monitor",
+          }
+
+          def get(path):
+              req = urllib.request.Request(api + path, headers=headers)
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return json.load(r)
+
+          failures = []
+          repository = get(f"/repos/{repo}")
+          release = get(f"/repos/{repo}/releases/tags/{os.environ['EXPECTED_TAG']}")
+          tag = get(f"/repos/{repo}/git/ref/tags/{os.environ['EXPECTED_TAG']}")
+          tag_sha = tag["object"]["sha"]
+          commit = get(f"/repos/{repo}/git/commits/{tag_sha}")
+          tree_sha = commit["tree"]["sha"]
+
+          checks = {
+              "repository visibility": (repository["visibility"], os.environ["EXPECTED_VISIBILITY"]),
+              "release ID": (str(release["id"]), os.environ["EXPECTED_RELEASE_ID"]),
+              "tag commit": (tag_sha, os.environ["EXPECTED_TAG_COMMIT"]),
+              "tag tree": (tree_sha, os.environ["EXPECTED_TAG_TREE"]),
+              "release prerelease flag": (str(release["prerelease"]).lower(), "true"),
+              "release draft flag": (str(release["draft"]).lower(), "false"),
+          }
+          for label, (actual, expected) in checks.items():
+              ok = actual == expected
+              print(f"{'PASS' if ok else 'FAIL'}: {label}: {actual}")
+              if not ok:
+                  failures.append(f"{label}: expected {expected}, got {actual}")
+
+          expected_assets = json.loads(os.environ["EXPECTED_ASSETS_JSON"])
+          actual_assets = {a["name"]: a.get("digest") for a in release["assets"]}
+          if set(actual_assets) != set(expected_assets):
+              failures.append(
+                  "asset set: expected " + repr(sorted(expected_assets)) +
+                  ", got " + repr(sorted(actual_assets))
+              )
+              print("FAIL: release asset set changed")
+          else:
+              print("PASS: release asset set")
+
+          for name, expected_digest in sorted(expected_assets.items()):
+              actual_digest = actual_assets.get(name)
+              ok = actual_digest == expected_digest
+              print(f"{'PASS' if ok else 'FAIL'}: {name}: {actual_digest}")
+              if not ok:
+                  failures.append(
+                      f"{name}: expected {expected_digest}, got {actual_digest}"
+                  )
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          status = "PASS — pinned public release matches PHASE 11E.2 baseline" if not failures else "FAIL — PUBLIC RELEASE DRIFT DETECTED"
+          lines = [
+              "# PHASE 11E.3 Public Release Drift Monitor",
+              "",
+              f"**{status}**",
+              "",
+              f"- Repository: `{repo}`",
+              f"- Release: `{os.environ['EXPECTED_TAG']}`",
+              f"- Release ID: `{release['id']}`",
+              f"- Tag commit: `{tag_sha}`",
+              f"- Git tree: `{tree_sha}`",
+              f"- Assets checked: **{len(expected_assets)}**",
+          ]
+          if failures:
+              lines += ["", "## Drift findings"] + [f"- {x}" for x in failures]
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as f:
+                  f.write("\n".join(lines) + "\n")
+          print(status)
+          if failures:
+              sys.exit(1)
+          PY
