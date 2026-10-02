@@ -25,7 +25,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: k49095107-sketch/lingua-track-desktop-releases
           EXPECTED_VISIBILITY: public
-          EXPECTED_RELEASE_ID: "396023250"
+          EXPECTED_RELEASE_ID: "396023249"
           EXPECTED_TAG: v1.0.0-desktop.1
           EXPECTED_TAG_COMMIT: b0e98ef8d15b97bd1aed50bc3b4f6b508bebf261
           EXPECTED_TAG_TREE: b97b1d6f571a9bd8728fe4a65a7829565eed771a
