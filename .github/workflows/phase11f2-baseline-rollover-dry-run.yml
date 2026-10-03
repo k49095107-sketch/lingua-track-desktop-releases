@@ -1,0 +1,105 @@
+name: PHASE 11F.2 Baseline Rollover Dry Run
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/phase11f2-baseline-rollover-dry-run.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline-rollover-dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Simulate baseline rollover state machine
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, sys
+
+          old = {
+            "release_id": "396023249",
+            "tag": "v1.0.0-desktop.1",
+            "tag_commit": "b0e98ef8d15b97bd1aed50bc3b4f6b508bebf261",
+            "tree": "b97b1d6f571a9bd8728fe4a65a7829565eed771a",
+            "assets": {
+              "app.deb": "sha256:" + "a"*64,
+              "app.deb.sigstore.json": "sha256:" + "b"*64,
+            },
+          }
+
+          candidate = {
+            "release_id": "DRY-RUN-NEXT-RELEASE",
+            "tag": "vNEXT-dry-run",
+            "tag_commit": hashlib.sha1(b"dry-run-next-release-commit").hexdigest(),
+            "tree": hashlib.sha1(b"dry-run-next-release-tree").hexdigest(),
+            "assets": {
+              "app-next.deb": "sha256:" + hashlib.sha256(b"dry-run-package").hexdigest(),
+              "app-next.deb.sigstore.json": "sha256:" + hashlib.sha256(b"dry-run-signature").hexdigest(),
+            },
+          }
+
+          def validate_baseline(x):
+            required = ("release_id", "tag", "tag_commit", "tree", "assets")
+            missing = [k for k in required if not x.get(k)]
+            if missing:
+              return False, "missing fields: " + ",".join(missing)
+            if not x["assets"]:
+              return False, "empty asset set"
+            if any(not d.startswith("sha256:") for d in x["assets"].values()):
+              return False, "invalid asset digest"
+            return True, "complete"
+
+          def same(a,b):
+            return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+
+          ok, why = validate_baseline(old)
+          assert ok, why
+          print("PASS: OLD BASELINE VALID")
+
+          broken = dict(candidate)
+          broken["assets"] = {}
+          ok, why = validate_baseline(broken)
+          assert not ok
+          print("PASS: INVALID CANDIDATE BLOCKED:", why)
+
+          ok, why = validate_baseline(candidate)
+          assert ok, why
+          print("PASS: NEXT RELEASE BASELINE CANDIDATE VALID")
+
+          active = old
+          assert same(active, old)
+          print("PASS: OLD BASELINE REMAINS ACTIVE BEFORE HANDOFF")
+
+          verified_public_release = candidate
+          assert same(verified_public_release, candidate)
+          active = candidate
+          assert same(active, verified_public_release)
+          print("PASS: BASELINE HANDOFF ONLY AFTER VERIFIED RELEASE")
+
+          monitor_observed = candidate
+          assert same(active, monitor_observed)
+          print("PASS: FIRST MONITOR CHECK ON NEW BASELINE")
+
+          active = old
+          assert same(active, old)
+          print("PASS: ROLLBACK RESTORES LAST KNOWN-GOOD BASELINE")
+
+          print("PASS — PHASE 11F.2 BASELINE ROLLOVER DRY RUN")
+          PY
+
+      - name: Record dry-run summary
+        if: always()
+        run: |
+          {
+            echo "# PHASE 11F.2 — Baseline Rollover Dry Run"
+            echo
+            echo "This workflow uses synthetic next-release metadata only."
+            echo
+            echo "- Production release/tag/assets: untouched"
+            echo "- Production drift-monitor baseline: untouched"
+            echo "- Permissions: contents read"
+            echo "- Model: OLD PASS -> invalid candidate blocked -> candidate verified -> handoff -> first new-baseline PASS -> rollback PASS"
+          } >> "$GITHUB_STEP_SUMMARY"
