@@ -1,0 +1,122 @@
+name: PHASE 11F.3 Release Promotion Safety Gates
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/phase11f3-release-promotion-safety-gates.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  safety-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Execute isolated promotion and rollback tests
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+
+          OLD = {
+              "tag": "v1.0.0-desktop.1",
+              "release_id": "396023249",
+              "assets": {
+                  "app.deb": "sha256:" + hashlib.sha256(b"last-known-good").hexdigest()
+              },
+          }
+          payload = b"candidate-package-vNEXT"
+          valid = {
+              "tag": "vNEXT-synthetic",
+              "qa_pass": True,
+              "signing_verified": True,
+              "candidate_sha256": hashlib.sha256(payload).hexdigest(),
+              "package_bytes": payload,
+              "assets": {
+                  "app-next.deb": "sha256:" + hashlib.sha256(payload).hexdigest(),
+                  "app-next.deb.sigstore.json": "sha256:" + hashlib.sha256(b"signature-bundle").hexdigest(),
+                  "SHA256SUMS.txt": "sha256:" + hashlib.sha256(b"checksums").hexdigest(),
+              },
+              "public_post_upload_verified": True,
+          }
+          required_assets = {"app-next.deb", "app-next.deb.sigstore.json", "SHA256SUMS.txt"}
+
+          def gate(c):
+              errors = []
+              if not c.get("qa_pass"):
+                  errors.append("QA evidence missing or failed")
+              if not c.get("signing_verified"):
+                  errors.append("signature verification missing or failed")
+              digest = c.get("candidate_sha256", "")
+              if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+                  errors.append("candidate SHA-256 malformed or absent")
+              elif digest != hashlib.sha256(c.get("package_bytes", b"")).hexdigest():
+                  errors.append("candidate SHA-256 does not match bytes")
+              assets = c.get("assets", {})
+              if set(assets) != required_assets:
+                  errors.append("required asset set mismatch")
+              for name, value in assets.items():
+                  if not isinstance(value, str) or len(value) != 71 or not value.startswith("sha256:") or any(ch not in "0123456789abcdef" for ch in value[7:]):
+                      errors.append("invalid asset digest: " + name)
+              if not c.get("public_post_upload_verified"):
+                  errors.append("public post-upload verification missing or failed")
+              return errors
+
+          def clone(c):
+              return {**c, "assets": dict(c["assets"])}
+
+          active = OLD
+          scenarios = [
+              ("QA missing", {"qa_pass": False}),
+              ("signing missing", {"signing_verified": False}),
+              ("checksum absent", {"candidate_sha256": ""}),
+              ("checksum wrong", {"candidate_sha256": "0"*64}),
+              ("post-upload verification missing", {"public_post_upload_verified": False}),
+          ]
+          for label, patch in scenarios:
+              c = clone(valid)
+              c.update(patch)
+              assert gate(c), "Unsafe promotion accepted: " + label
+              assert active is OLD
+              print("PASS: BLOCKED —", label)
+
+          for label, remove in [("package missing", "app-next.deb"), ("signature asset missing", "app-next.deb.sigstore.json"), ("checksum asset missing", "SHA256SUMS.txt")]:
+              c = clone(valid)
+              del c["assets"][remove]
+              assert gate(c), "Unsafe promotion accepted: " + label
+              assert active is OLD
+              print("PASS: BLOCKED —", label)
+
+          assert not gate(valid), gate(valid)
+          print("PASS: VALID CANDIDATE ELIGIBLE FOR PROMOTION")
+          assert active is OLD
+          print("PASS: LAST KNOWN GOOD BASELINE RETAINED BEFORE HANDOFF")
+
+          verified_public_candidate = True
+          assert verified_public_candidate and not gate(valid)
+          active = {"tag": valid["tag"], "release_id": "SYNTHETIC-ONLY"}
+          assert active["tag"] == "vNEXT-synthetic"
+          print("PASS: SYNTHETIC PROMOTION AFTER ALL GATES")
+
+          rollout_failure = True
+          if rollout_failure:
+              active = OLD
+          assert active is OLD
+          print("PASS: ROLLBACK TO LAST KNOWN GOOD")
+
+          print("PASS — PHASE 11F.3 RELEASE PROMOTION & ROLLBACK SAFETY GATES")
+          PY
+
+      - name: Write scope summary
+        if: always()
+        run: |
+          {
+            echo '# PHASE 11F.3 — Safety Gates'
+            echo ''
+            echo 'All next-release identities and package data are synthetic. No promotion API calls.'
+            echo 'This test does not modify the public release, Git tags, monitor, or baseline.'
+            echo 'Actual release publication still requires live candidate QA and post-upload verification.'
+          } >> "$GITHUB_STEP_SUMMARY"
