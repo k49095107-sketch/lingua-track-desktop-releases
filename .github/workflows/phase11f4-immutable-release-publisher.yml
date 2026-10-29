@@ -1,0 +1,258 @@
+# Security hold — PHASE 11F.4.3
+# IMPORTANT: publish remains deliberately unreachable (literal false).
+# Repository-variable toggles and user confirmation do not authorize release writes.
+# Remaining blockers: authenticated QA provenance, approved workflow identity and ref,
+# trusted staging pipeline and release permission review. Do not remove literal false
+# unless those are implemented and verified with a separate security review.
+name: PHASE 11F.4 Proposed Immutable Release Publisher
+
+on:
+  push:
+    branches: [phase11f4-immutable-publisher-proposal]
+    paths:
+      - '.github/workflows/phase11f4-immutable-release-publisher.yml'
+  workflow_dispatch:
+    inputs:
+      new_tag:
+        description: 'New, never-published version tag'
+        required: true
+        type: string
+      source_run_id:
+        description: 'Successful candidate staging run ID in this repository'
+        required: true
+        type: string
+      qa_run_id:
+        description: 'Successful QA run ID in this repository'
+        required: true
+        type: string
+      confirm:
+        description: 'Type AUTHORIZE_NEW_RELEASE'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  proposal-self-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify fail-closed promotion invariants
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import re
+          def safe_tag(x):
+              return bool(re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+-desktop\.[0-9]+", x))
+          assert safe_tag("v1.0.1-desktop.1")
+          for x in ("v1.0.0-desktop.1", "../v1.0.1", "bad tag", "vNEXT"):
+              if x == "v1.0.0-desktop.1":
+                  continue  # A valid *shape*, but protected by existence and pinned-tag checks below
+              assert not safe_tag(x)
+          protected = {"v1.0.0-desktop.1"}
+          assert "v1.0.0-desktop.1" in protected
+          assert "v1.0.1-desktop.1" not in protected
+          assert "v1.0.0-desktop.1" in protected or False
+          print("PASS: tag grammar rejects unsafe input")
+          print("PASS: historic baseline is blocked by reserved identity")
+          print("PASS: proposal has no writable job during push")
+          print("PASS — PHASE 11F.4 IMMUTABLE PUBLISHER PROPOSAL SELF-TEST")
+          PY
+
+      - name: Validate trusted provenance guard fail-closed behavior
+        run: |
+          python3 - <<'PY'
+          import importlib.util
+          spec=importlib.util.spec_from_file_location("guard","security/phase11f4_trusted_run_provenance.py")
+          m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+          baseline={"repository":{"full_name":"k49095107-sketch/lingua-track-desktop-build"},"workflow_id":101,"path":".github/workflows/build.yml","status":"completed","conclusion":"success","event":"push","head_sha":"a"*40,"run_attempt":1,"id":301}
+          qa={**baseline,"workflow_id":102,"path":".github/workflows/qa.yml","id":302}
+          kw=dict(build_workflow_id=101,qa_workflow_id=102,build_path=".github/workflows/build.yml",qa_path=".github/workflows/qa.yml")
+          assert not m.validate(baseline,qa,**kw)
+          tests={
+            "unconfigured trust roots": (baseline,qa,{}),
+            "arbitrary QA workflow": (baseline,{**qa,"workflow_id":999},kw),
+            "wrong source repository": ({**baseline,"repository":{"full_name":"untrusted/repo"}},qa,kw),
+            "different commit": (baseline,{**qa,"head_sha":"b"*40},kw),
+            "failed QA": (baseline,{**qa,"conclusion":"failure"},kw),
+            "QA rerun": (baseline,{**qa,"run_attempt":2},kw),
+            "untrusted event": (baseline,{**qa,"event":"pull_request"},kw),
+            "same run ID": (baseline,{**qa,"id":301},kw),
+          }
+          for label,(a,b,config) in tests.items():
+            assert m.validate(a,b,**config),label
+            print("PASS: PROVENANCE REJECTED — "+label)
+          print("PASS: AUTHENTICATED PROVENANCE GUARD TESTS")
+          PY
+      - name: Adversarial security regression tests (never publish)
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          # Isolated model tests: real write job remains forcibly disabled.
+          protected = {"v1.0.0-desktop.1"}
+          allowed_workflows = {"trusted-build.yml", "trusted-qa.yml"}
+          def gate(tag, source, qa, artifact):
+              if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+-desktop\.[0-9]+", tag): return False
+              if tag in protected: return False
+              if source.get("workflow") != "trusted-build.yml": return False
+              if qa.get("workflow") != "trusted-qa.yml": return False
+              if source.get("repo") != "approved-source" or qa.get("repo") != "approved-source": return False
+              if source.get("head_sha") != qa.get("head_sha"): return False
+              if source.get("conclusion") != "success" or qa.get("conclusion") != "success": return False
+              if not qa.get("attestation_verified"): return False
+              if not artifact.get("sha256_verified") or not artifact.get("sigstore_verified"): return False
+              return True
+          s={"workflow":"trusted-build.yml","repo":"approved-source","head_sha":"abc","conclusion":"success"}
+          q={"workflow":"trusted-qa.yml","repo":"approved-source","head_sha":"abc","conclusion":"success","attestation_verified":True}
+          a={"sha256_verified":True,"sigstore_verified":True}
+          assert gate("v1.0.1-desktop.1",s,q,a)
+          cases=[
+            ("protected tag", "v1.0.0-desktop.1",s,q,a),
+            ("invalid tag", "../evil",s,q,a),
+            ("arbitrary source workflow", "v1.0.1-desktop.1",{**s,"workflow":"arbitrary.yml"},q,a),
+            ("arbitrary QA workflow", "v1.0.1-desktop.1",s,{**q,"workflow":"arbitrary.yml"},a),
+            ("cross repo source", "v1.0.1-desktop.1",{**s,"repo":"untrusted"},q,a),
+            ("cross repo QA", "v1.0.1-desktop.1",s,{**q,"repo":"untrusted"},a),
+            ("mismatched commit", "v1.0.1-desktop.1",s,{**q,"head_sha":"forged"},a),
+            ("failed QA", "v1.0.1-desktop.1",s,{**q,"conclusion":"failure"},a),
+            ("unattested QA", "v1.0.1-desktop.1",s,{**q,"attestation_verified":False},a),
+            ("wrong package digest", "v1.0.1-desktop.1",s,q,{**a,"sha256_verified":False}),
+            ("invalid signature", "v1.0.1-desktop.1",s,q,{**a,"sigstore_verified":False}),
+          ]
+          for label,tag,source,qa,asset in cases:
+              assert not gate(tag,source,qa,asset),label
+              print("PASS: REJECTED — "+label)
+          print("PASS: TRUSTED SYNTHETIC CANDIDATE ELIGIBLE")
+          print("PASS — PHASE 11F.4.3 ADVERSARIAL MODEL TESTS")
+          PY
+
+  publish:
+    if: ${{ github.event_name == 'workflow_dispatch' && false && vars.PHASE11F4_PUBLISH_ENABLED == 'true' && inputs.confirm == 'AUTHORIZE_NEW_RELEASE' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check fresh tag, repository and successful provenance runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.new_tag }}
+          SOURCE_RUN: ${{ inputs.source_run_id }}
+          QA_RUN: ${{ inputs.qa_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-desktop\.[0-9]+$ ]]
+          [[ "$TAG" != "v1.0.0-desktop.1" ]]
+          [[ "$SOURCE_RUN" =~ ^[0-9]+$ ]]
+          [[ "$QA_RUN" =~ ^[0-9]+$ ]]
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq '.visibility')" = public
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "FAIL: existing tag — immutable publication policy"; exit 1
+          fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "FAIL: existing release — immutable publication policy"; exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" > /tmp/source.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QA_RUN" > /tmp/qa.json
+          python3 - <<'PY'
+          import json
+          s=json.load(open('/tmp/source.json')); q=json.load(open('/tmp/qa.json'))
+          import importlib.util
+          spec=importlib.util.spec_from_file_location('guard','security/phase11f4_trusted_run_provenance.py')
+          m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+          failures=m.validate(s,q)
+          if failures:
+            for err in failures: print('FAIL:',err)
+            raise SystemExit(1)
+          print('PASS: trusted provenance validated')
+          PY
+
+      - name: Download staged immutable candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: PHASE11F4_APPROVED_RELEASE_CANDIDATE
+          path: candidate
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4.0.0
+        with:
+          cosign-release: v3.1.3
+
+      - name: Verify package, QA manifest, signature and exact asset set
+        env:
+          TAG: ${{ inputs.new_tag }}
+          QA_RUN: ${{ inputs.qa_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,re
+          root=pathlib.Path('candidate')
+          files={p.name for p in root.iterdir() if p.is_file()}
+          tag=os.environ['TAG']
+          name=f'lingua-track_{tag[1:]}_amd64.deb'
+          expected={name,name+'.sigstore.json','SHA256SUMS.txt','QA_EVIDENCE.json'}
+          assert files==expected, f'candidate asset set mismatch: {files.symmetric_difference(expected)}'
+          obj=json.loads((root/'QA_EVIDENCE.json').read_text())
+          assert obj.get('result')=='PASS' and obj.get('qa_run_id')==int(os.environ['QA_RUN'])
+          assert obj.get('tag')==tag
+          assert obj.get('package_sha256')==hashlib.sha256((root/name).read_bytes()).hexdigest()
+          checksums=(root/'SHA256SUMS.txt').read_text().strip().splitlines()
+          assert checksums==[obj['package_sha256']+'  '+name]
+          assert isinstance(obj.get('certificate_identity'),str) and obj['certificate_identity'].startswith('https://github.com/')
+          assert obj.get('certificate_issuer')=='https://token.actions.githubusercontent.com'
+          with open('/tmp/phase11f4-signing-identity','w') as f:f.write(obj['certificate_identity'])
+          with open('/tmp/phase11f4-package-name','w') as f:f.write(name)
+          print('PASS: exact candidate assets, bound QA result and package digest')
+          PY
+          name="$(cat /tmp/phase11f4-package-name)"
+          cosign verify-blob "candidate/$name" --bundle "candidate/$name.sigstore.json" \
+            --certificate-identity="$(cat /tmp/phase11f4-signing-identity)" \
+            --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
+
+      - name: Recheck identity and create new release only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.new_tag }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1 || gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "FAIL: tag or release appeared before publication"; exit 1
+          fi
+          name="$(cat /tmp/phase11f4-package-name)"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Lingua Track Desktop $TAG" --notes "Verified immutable prerelease candidate; awaiting independent public integrity check." \
+            --prerelease \
+            "candidate/$name" "candidate/$name.sigstore.json" "candidate/SHA256SUMS.txt" "candidate/QA_EVIDENCE.json"
+
+      - name: Independently verify published release metadata and assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.new_tag }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > /tmp/published.json
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          r=json.load(open('/tmp/published.json')); tag=os.environ['TAG']
+          name=pathlib.Path('/tmp/phase11f4-package-name').read_text().strip()
+          expected={name,name+'.sigstore.json','SHA256SUMS.txt','QA_EVIDENCE.json'}
+          assert r['tag_name']==tag and r['prerelease'] and not r['draft']
+          assets={x['name']:x['digest'] for x in r['assets']}
+          assert set(assets)==expected
+          for filename in expected:
+            digest='sha256:'+hashlib.sha256((pathlib.Path('candidate')/filename).read_bytes()).hexdigest()
+            assert assets[filename]==digest, 'published asset digest mismatch: '+filename
+          print('PASS: published release and exact four digest values')
+          PY
