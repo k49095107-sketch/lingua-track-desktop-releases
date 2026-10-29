@@ -1,3 +1,9 @@
+# Security hold — PHASE 11F.4.3
+# IMPORTANT: publish remains deliberately unreachable (literal false).
+# Repository-variable toggles and user confirmation do not authorize release writes.
+# Remaining blockers: authenticated QA provenance, approved workflow identity and ref,
+# trusted staging pipeline and release permission review. Do not remove literal false
+# unless those are implemented and verified with a separate security review.
 name: PHASE 11F.4 Proposed Immutable Release Publisher
 
 on:
@@ -53,8 +59,52 @@ jobs:
           print("PASS — PHASE 11F.4 IMMUTABLE PUBLISHER PROPOSAL SELF-TEST")
           PY
 
+      - name: Adversarial security regression tests (never publish)
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          # Isolated model tests: real write job remains forcibly disabled.
+          protected = {"v1.0.0-desktop.1"}
+          allowed_workflows = {"trusted-build.yml", "trusted-qa.yml"}
+          def gate(tag, source, qa, artifact):
+              if not re.fullmatch(r"v[0-9]+\\.[0-9]+\\.[0-9]+-desktop\\.[0-9]+", tag): return False
+              if tag in protected: return False
+              if source.get("workflow") != "trusted-build.yml": return False
+              if qa.get("workflow") != "trusted-qa.yml": return False
+              if source.get("repo") != "approved-source" or qa.get("repo") != "approved-source": return False
+              if source.get("head_sha") != qa.get("head_sha"): return False
+              if source.get("conclusion") != "success" or qa.get("conclusion") != "success": return False
+              if not qa.get("attestation_verified"): return False
+              if not artifact.get("sha256_verified") or not artifact.get("sigstore_verified"): return False
+              return True
+          s={"workflow":"trusted-build.yml","repo":"approved-source","head_sha":"abc","conclusion":"success"}
+          q={"workflow":"trusted-qa.yml","repo":"approved-source","head_sha":"abc","conclusion":"success","attestation_verified":True}
+          a={"sha256_verified":True,"sigstore_verified":True}
+          assert gate("v1.0.1-desktop.1",s,q,a)
+          cases=[
+            ("protected tag", "v1.0.0-desktop.1",s,q,a),
+            ("invalid tag", "../evil",s,q,a),
+            ("arbitrary source workflow", "v1.0.1-desktop.1",{**s,"workflow":"arbitrary.yml"},q,a),
+            ("arbitrary QA workflow", "v1.0.1-desktop.1",s,{**q,"workflow":"arbitrary.yml"},a),
+            ("cross repo source", "v1.0.1-desktop.1",{**s,"repo":"untrusted"},q,a),
+            ("cross repo QA", "v1.0.1-desktop.1",s,{**q,"repo":"untrusted"},a),
+            ("mismatched commit", "v1.0.1-desktop.1",s,{**q,"head_sha":"forged"},a),
+            ("failed QA", "v1.0.1-desktop.1",s,{**q,"conclusion":"failure"},a),
+            ("unattested QA", "v1.0.1-desktop.1",s,{**q,"attestation_verified":False},a),
+            ("wrong package digest", "v1.0.1-desktop.1",s,q,{**a,"sha256_verified":False}),
+            ("invalid signature", "v1.0.1-desktop.1",s,q,{**a,"sigstore_verified":False}),
+          ]
+          for label,tag,source,qa,asset in cases:
+              assert not gate(tag,source,qa,asset),label
+              print("PASS: REJECTED — "+label)
+          print("PASS: TRUSTED SYNTHETIC CANDIDATE ELIGIBLE")
+          print("PASS — PHASE 11F.4.3 ADVERSARIAL MODEL TESTS")
+          PY
+
   publish:
-    if: ${{ github.event_name == 'workflow_dispatch' && vars.PHASE11F4_PUBLISH_ENABLED == 'true' && inputs.confirm == 'AUTHORIZE_NEW_RELEASE' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && false && vars.PHASE11F4_PUBLISH_ENABLED == 'true' && inputs.confirm == 'AUTHORIZE_NEW_RELEASE' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
