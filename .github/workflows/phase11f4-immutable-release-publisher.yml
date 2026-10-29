@@ -37,6 +37,9 @@ jobs:
   proposal-self-test:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Verify fail-closed promotion invariants
         shell: bash
         run: |
@@ -59,6 +62,31 @@ jobs:
           print("PASS — PHASE 11F.4 IMMUTABLE PUBLISHER PROPOSAL SELF-TEST")
           PY
 
+      - name: Validate trusted provenance guard fail-closed behavior
+        run: |
+          python3 - <<'PY'
+          import importlib.util
+          spec=importlib.util.spec_from_file_location("guard","security/phase11f4_trusted_run_provenance.py")
+          m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+          baseline={"repository":{"full_name":"k49095107-sketch/lingua-track-desktop-build"},"workflow_id":101,"path":".github/workflows/build.yml","status":"completed","conclusion":"success","event":"push","head_sha":"a"*40,"run_attempt":1,"id":301}
+          qa={**baseline,"workflow_id":102,"path":".github/workflows/qa.yml","id":302}
+          kw=dict(build_workflow_id=101,qa_workflow_id=102,build_path=".github/workflows/build.yml",qa_path=".github/workflows/qa.yml")
+          assert not m.validate(baseline,qa,**kw)
+          tests={
+            "unconfigured trust roots": (baseline,qa,{}),
+            "arbitrary QA workflow": (baseline,{**qa,"workflow_id":999},kw),
+            "wrong source repository": ({**baseline,"repository":{"full_name":"untrusted/repo"}},qa,kw),
+            "different commit": (baseline,{**qa,"head_sha":"b"*40},kw),
+            "failed QA": (baseline,{**qa,"conclusion":"failure"},kw),
+            "QA rerun": (baseline,{**qa,"run_attempt":2},kw),
+            "untrusted event": (baseline,{**qa,"event":"pull_request"},kw),
+            "same run ID": (baseline,{**qa,"id":301},kw),
+          }
+          for label,(a,b,config) in tests.items():
+            assert m.validate(a,b,**config),label
+            print("PASS: PROVENANCE REJECTED — "+label)
+          print("PASS: AUTHENTICATED PROVENANCE GUARD TESTS")
+          PY
       - name: Adversarial security regression tests (never publish)
         shell: bash
         run: |
@@ -111,6 +139,9 @@ jobs:
       actions: read
     timeout-minutes: 30
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Check fresh tag, repository and successful provenance runs
         env:
           GH_TOKEN: ${{ github.token }}
@@ -135,12 +166,14 @@ jobs:
           python3 - <<'PY'
           import json
           s=json.load(open('/tmp/source.json')); q=json.load(open('/tmp/qa.json'))
-          assert s['repository']['full_name']==q['repository']['full_name'], 'cross-repository provenance denied'
-          assert s['status']==q['status']=='completed'
-          assert s['conclusion']==q['conclusion']=='success'
-          assert s['head_sha']==q['head_sha'], 'QA and candidate source commit differ'
-          assert s['event'] != 'workflow_dispatch' or True
-          print('PASS: completed candidate and QA runs bound to same commit')
+          import importlib.util
+          spec=importlib.util.spec_from_file_location('guard','security/phase11f4_trusted_run_provenance.py')
+          m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+          failures=m.validate(s,q)
+          if failures:
+            for err in failures: print('FAIL:',err)
+            raise SystemExit(1)
+          print('PASS: trusted provenance validated')
           PY
 
       - name: Download staged immutable candidate
