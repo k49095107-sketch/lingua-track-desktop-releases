@@ -69,7 +69,7 @@ jobs:
           protected = {"v1.0.0-desktop.1"}
           allowed_workflows = {"trusted-build.yml", "trusted-qa.yml"}
           def gate(tag, source, qa, artifact):
-              if not re.fullmatch(r"v[0-9]+\\.[0-9]+\\.[0-9]+-desktop\\.[0-9]+", tag): return False
+              if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+-desktop\.[0-9]+", tag): return False
               if tag in protected: return False
               if source.get("workflow") != "trusted-build.yml": return False
               if qa.get("workflow") != "trusted-qa.yml": return False
