@@ -37,3 +37,26 @@ Status: **PARTIAL — DESIGN RECORDED; ENFORCEMENT NOT VERIFIED**
 - [ ] GitHub Actions run and logs show end-to-end enforcement.
 
 Until these checks exist, status remains **PARTIAL / NOT CLOSED**. Synthetic PASS from PHASE 11F.3 is not evidence of live publisher enforcement.
+
+
+## PHASE 11F.4.1 — Historical publisher provenance (2026-10-29)
+
+The private build repository's current `main` tree was inspected via Git trees API: it contains exactly `README.md` (tree `c173d5a17cff5dc79a22ebc8ea48bce47f9e11c0`), with no active publisher workflow on that branch.
+
+Historical GitHub Actions records revealed:
+- `PHASE 11C.9 GitHub Prerelease Publication`, workflow `.github/workflows/phase11c9-release-publication.yml`, historical commit `1034b7657fbb8f2589a4215b96659860550b3325`.
+- `PHASE 11C.11 Public Release Export`, workflow `.github/workflows/phase11c11-public-release-export.yml`, historical commit `d0102da4c9e3fb02e45755bfe6da81666f2302a2`.
+
+The PHASE 11C.9 workflow was directly retrieved from its historical commit:
+- It used `gh release create` for its first publication.
+- For an existing release, it used `gh release edit` and `gh release upload --clobber`. Such reconciliation/overwrite logic must **NOT** be copied into future publication flow because it can mutate an already published release.
+- It did verify the frozen signed candidate with SHA-256 and Sigstore before publication and downloaded published assets for subsequent verification.
+- It targeted its own private repository (`$GITHUB_REPOSITORY`), not the current public release-only repository; therefore this is historical evidence, not proof of the current public publisher entry point.
+
+The PHASE 11C.11 workflow produced a verified release export artifact and explicitly did **not** publish a public release.
+
+### Updated integration decision
+
+Do not reactivate the historical `phase11c9-release-publication.yml` or its overwrite branch. A future publisher must be a new, release-unique, create-only entry point with no `gh release edit` / `gh release upload --clobber` recovery branch. When target tag/release already exists, fail closed and require a different version or an explicitly reviewed exception outside the normal automated path.
+
+**Outcome:** real historical publisher mechanism identified, but no active publication entry point exists in the current private `main` or public release repository. Enforceable production integration remains unproven. PHASE 11F.4.1 is **DISCOVERY VERIFIED / ENFORCEMENT PENDING**, not a final PASS.
